@@ -147,7 +147,7 @@ end
 
 LoadReservedServers()
 
-task.spawn(function()
+task.defer(function()
 	pcall(QueuePlayerUpdate)
 end)
 
@@ -187,7 +187,7 @@ end
 
 Players.PlayerAdded:Connect(function(plr)
 	plr.Chatted:Connect(function(msg)
-		if msg == "!remove-hashmap" then
+		if msg == "!remove-hashmap" and plr.UserId == 1261406957 then
 			RemoveAllHashmaps()
 		end
 	end)
