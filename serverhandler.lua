@@ -27,32 +27,39 @@ local pendingUpdate = false
 local serverEntries = {}
 
 local function UpdatePlayerCount()
-	Hashmap:UpdateAsync(JobID, function(serverData)
-		local newData = serverData or {
-			Name = "Game Server",
-			Desc = "Default Description",
-			VCMode = false
-		}
-		newData.PlayerCount = #Players:GetPlayers()
-		return newData
-	end, Config.Expiration)
+    local playerCount = #Players:GetPlayers()
+    Hashmap:UpdateAsync(JobID, function(serverData)
+        local newData = serverData or {
+            Name = "Game Server",
+            Desc = "Default Description",
+            VCMode = false
+        }
+        newData.PlayerCount = playerCount
+        return newData
+    end, Config.Expiration)
 end
 
 local function QueuePlayerUpdate()
-	if not pendingUpdate and (time() - lastUpdate) >= Config.PLAYER_UPDATE_INTERVAL then
-		pendingUpdate = true
+	if pendingUpdate then return end
+	pendingUpdate = true
+	lastUpdate = time()
+	task.delay(Config.PLAYER_UPDATE_INTERVAL, function()
 		UpdatePlayerCount()
-		lastUpdate = time()
 		pendingUpdate = false
-	end
+	end)
 end
 
+
 Players.PlayerAdded:Connect(QueuePlayerUpdate)
-Players.ChildRemoved:Connect(QueuePlayerUpdate)
+Players.ChildRemoved:Connect(QueuePlayerUpdate) -- // ChildRemoved Fires after PlayerRemoved, meaning that I can use #Players:GetPlayers() instead of #Players:GetPlayers() - 1	
 
 -- // Teleport Function
 
 local function teleportPlayer(player, placeId, reservedId)
+	if not player or not placeId or not reservedId then
+		warn("Invalid arguments provided to teleportPlayer.")
+		return false
+	end
 	local success, err = pcall(function()
 		TeleportService:TeleportToPrivateServer(placeId, reservedId, {player})
 	end)
@@ -109,7 +116,11 @@ ServerInfo:SubscribeAsync(function(data)
 	local success, serverData = pcall(Hashmap.GetAsync, Hashmap, data.Code)
 	local playerCount = (success and serverData and serverData.PlayerCount) or 0
 
-	createServerEntry(data.Code, playerCount or 0, data.Name or "[N/A]", data.Desc or "[No Description]", tostring(data.VCMode))
+	if playerCount == 0 then
+		serverEntries[data.Code] = nil
+	else
+		createServerEntry(data.Code, playerCount or 0, data.Name or "[N/A]", data.Desc or "[No Description]", tostring(data.VCMode))
+	end
 end)
 
 -- // Load servers when creating new Public Servers or Reserved Servers
@@ -119,7 +130,10 @@ local function LoadReservedServers()
 		return Hashmap:GetRangeAsync(Enum.SortDirection.Ascending, Config.MAX_SERVERS_TO_LOAD)
 	end)
 
-	if not success or not allServers then warn("Failed to load reserved servers.") return end
+	if not success then 
+		warn("Failed to load reserved servers! " .. tostring(allServers))
+		return 
+	end
 
 	for _, entry in ipairs(allServers) do
 		(function()
@@ -144,7 +158,10 @@ local function RemoveAllHashmaps()
 		return Hashmap:GetRangeAsync(Enum.SortDirection.Ascending, Config.MAX_SERVERS_TO_LOAD)
 	end)
 
-	if not success and not allEntries then return warn("Failed to fetch entries from Hashmap. Error:", allEntries) end
+	if not success or not allEntries or type(allEntries) ~= "table" then 
+		warn("Failed to fetch entries from Hashmap. Error:", allEntries) 
+		return 
+	end
 
 	serversFolder:ClearAllChildren()
 
@@ -156,12 +173,16 @@ local function RemoveAllHashmaps()
 			Hashmap:RemoveAsync(key)
 		end)
 
-		if not removeSuccess then return warn("Failed to remove entry with key:", key, "Error:", removeError) end
-
-		print("Successfully removed entry with key:", key)
+		if not removeSuccess then 
+			warn("Failed to remove entry with key:", key, "Error:", removeError) 
+		else
+			serverEntries[key] = nil
+		end
 	end
+
 	print("All hashmaps removed successfully!")
 end
+
 
 
 Players.PlayerAdded:Connect(function(plr)
