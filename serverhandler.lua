@@ -1,113 +1,187 @@
+-- // Variables
+
 local serversFolder = game.ReplicatedStorage:WaitForChild("Servers")
 local Messenger = require(game.ReplicatedStorage:WaitForChild("Messenger"))
 local events = game.ReplicatedStorage:WaitForChild("Events")
 local CreateServer = events:WaitForChild("CreateServer")
 local TeleportService = game:GetService("TeleportService")
-local PLACE_ID = game.PlaceId
-local rate = 5
+local PlaceId = game.PlaceId
 local Players = game:GetService('Players')
-local ms = Messenger.new("ServerList")
-local si = Messenger.new("ServerInfo")
+local ServerInfo = Messenger.new("ServerInfo")
 local MessagingService = game:GetService("MessagingService")
 local JobID = game.JobId
 local MemoryStoreService = game:GetService('MemoryStoreService')
 local Hashmap = MemoryStoreService:GetSortedMap('PlayersInServers')
+local Teleport = events:WaitForChild("Teleport")
 
-local Expiration = 60 * 60 * 24 * 7
+local Config = {
+    PLAYER_UPDATE_INTERVAL = 5,
+    Expiration = 86400,
+	SERVER_VALUE_FORMAT = "%s %d %s %s %s",
+	MAX_SERVERS_TO_LOAD = 200
+}
 
-local function PlayerCountChanged(ServerId) --lowkey failed at making this :c too lazy to do it bc i will have to rework the whole system
-	local success, serverData = pcall(function()
-		return Hashmap:GetAsync(ServerId)
-	end)
+local lastUpdate = time()
+local pendingUpdate = false
 
-	if success and serverData then
-		serverData.PlayerCount = #Players:GetPlayers()
-		Hashmap:SetAsync(ServerId, serverData, Expiration)
-		
-		local serverValue = serversFolder:FindFirstChild("Server: " .. ServerId)
-		if serverValue then
-			serverValue.Value = string.format(
-				"%s %d %s %s %s",
-				ServerId,
-				serverData.PlayerCount,
-				serverData.Name or "[N/A]",
-				serverData.Desc or "[No Description]",
-				tostring(serverData.VCMode)
-			)
-		end
+local serverEntries = {}
+
+local function UpdatePlayerCount()
+	Hashmap:UpdateAsync(JobID, function(serverData)
+		local newData = serverData or {
+			Name = "Game Server",
+			Desc = "Default Description",
+			VCMode = false
+		}
+		newData.PlayerCount = #Players:GetPlayers()
+		return newData
+	end, Config.Expiration)
+end
+
+local function QueuePlayerUpdate()
+	if not pendingUpdate and (time() - lastUpdate) >= Config.PLAYER_UPDATE_INTERVAL then
+		pendingUpdate = true
+		UpdatePlayerCount()
+		lastUpdate = time()
+		pendingUpdate = false
 	end
 end
 
-CreateServer.OnServerEvent:Connect(function(player, Desc, Name, VCMode)
-	local success, code = pcall(function()
-		return TeleportService:ReserveServer(PLACE_ID)
+Players.PlayerAdded:Connect(QueuePlayerUpdate)
+Players.ChildRemoved:Connect(QueuePlayerUpdate)
+
+-- // Teleport Function
+
+local function teleportPlayer(player, placeId, reservedId)
+	local success, err = pcall(function()
+		TeleportService:TeleportToPrivateServer(placeId, reservedId, {player})
 	end)
+	
+	if not success then Hashmap:RemoveAsync(reservedId) return warn("Teleport failed! Server: "..reservedId) end
+	
+	return success
+end
 
-	if success then
+-- // Server creation Function
 
+CreateServer.OnServerEvent:Connect(function(player, Desc, Name, VCMode)
+	local success, code = pcall(TeleportService.ReserveServer, TeleportService, PlaceId)
+
+	if not success then warn("Failed to Reserve Server! "..tostring(code)) return end
+
+	-- // Initial server data
+	local setSuccess, err = pcall(function()
 		Hashmap:SetAsync(code, {
 			PlayerCount = 1,
 			Name = Name,
 			Desc = Desc,
 			VCMode = VCMode
-		}, Expiration)
-
-		si:PublishAsync({
-			Code = code,
-			Name = Name,
-			Desc = Desc,
-			VCMode = VCMode
-		})
-
-		TeleportService:TeleportToPrivateServer(PLACE_ID, code, {player}, nil, {
-			Description = Desc,
-			ServerName = Name,
-			VCMode = VCMode
-		})
-
-	else
-		warn("Failed to reserve server; code: " .. tostring(code))
-	end
-end)
-
-si:SubscribeAsync(function(message)
-	local data = message
-	local serverValue = script.ServerName:Clone()
-
-	local success, serverData = pcall(function()
-		return Hashmap:GetAsync(data.Code)
+		}, Config.Expiration)
 	end)
 
-	local playerCount = (success and serverData and serverData.PlayerCount) or 1
+	if not setSuccess then warn("Failed to Set Server Data! "..tostring(err)) return end
 
-	serverValue.Name = "Server: " .. data.Code
-	serverValue.Parent = serversFolder
-	serverValue.Value = string.format(
-		"%s %d %s %s %s",
-		data.Code,
-		playerCount,
-		data.Name or "[N/A]",
-		data.Desc or "[No Description]",
-		tostring(data.VCMode)
-	)
+	teleportPlayer(player, PlaceId, code)
+
+	ServerInfo:PublishAsync({
+		Code = code,
+		Name = Name,
+		Desc = Desc,
+		VCMode = VCMode
+	})
 end)
 
-while true do
-	for _, serverValue in pairs(serversFolder:GetChildren()) do
-		local serverStats = string.split(serverValue.Value, " ")
-		local reservationCode = serverStats[1]
-		PlayerCountChanged(reservationCode)
-	end
-	task.wait(rate)
+-- // StringValue Creation for all Reserved Servers
+
+local function createServerEntry(code, playerCount, name, desc, vcMode)
+	local serverValue = Instance.new("StringValue")
+	serverValue.Name = "Server: " .. code
+	serverValue.Value = string.format(Config.SERVER_VALUE_FORMAT, code, playerCount, name, desc, tostring(vcMode))
+	serverValue.Parent = serversFolder
+	serverEntries[code] = serverValue
 end
 
-game:BindToClose(function()
-	for _, serverInfo in pairs(serversFolder:GetChildren()) do
-		local serverStats = string.split(serverInfo.Value, " ")
-		local serverId = serverStats[1]
+-- // Server Info Handling
 
-		local success, err = pcall(function()
-			Hashmap:RemoveAsync(serverId)
-		end)
+ServerInfo:SubscribeAsync(function(data)
+	if serverEntries[data.Code] then return end
+
+	local success, serverData = pcall(Hashmap.GetAsync, Hashmap, data.Code)
+	local playerCount = (success and serverData and serverData.PlayerCount) or 0
+
+	createServerEntry(data.Code, playerCount or 0, data.Name or "[N/A]", data.Desc or "[No Description]", tostring(data.VCMode))
+end)
+
+-- // Load servers when creating new Public Servers or Reserved Servers
+
+local function LoadReservedServers()
+	local success, allServers = pcall(function()
+		return Hashmap:GetRangeAsync(Enum.SortDirection.Ascending, Config.MAX_SERVERS_TO_LOAD)
+	end)
+
+	if not success or not allServers then warn("Failed to load reserved servers.") return end
+
+	for _, entry in ipairs(allServers) do
+		(function()
+			if serverEntries[entry.key] then
+				return 
+			end
+			createServerEntry(entry.key, entry.value.PlayerCount or 0, entry.value.Name or "[N/A]", entry.value.Desc or "[No Description]", tostring(entry.value.VCMode))
+		end)()
 	end
+end
+
+LoadReservedServers()
+
+task.spawn(function()
+	pcall(QueuePlayerUpdate)
+end)
+
+-- // Remove Hashmap Function for Debugging
+
+local function RemoveAllHashmaps()
+	local success, allEntries = pcall(function()
+		return Hashmap:GetRangeAsync(Enum.SortDirection.Ascending, Config.MAX_SERVERS_TO_LOAD)
+	end)
+
+	if not success and not allEntries then return warn("Failed to fetch entries from Hashmap. Error:", allEntries) end
+
+	serversFolder:ClearAllChildren()
+
+	for _, entry in ipairs(allEntries) do
+		local key = entry.key
+		print("Attempting to remove entry with key:", key)
+
+		local removeSuccess, removeError = pcall(function()
+			Hashmap:RemoveAsync(key)
+		end)
+
+		if not removeSuccess then return warn("Failed to remove entry with key:", key, "Error:", removeError) end
+
+		print("Successfully removed entry with key:", key)
+	end
+	print("All hashmaps removed successfully!")
+end
+
+
+Players.PlayerAdded:Connect(function(plr)
+	plr.Chatted:Connect(function(msg)
+		if msg == "!remove-hashmap" then
+			RemoveAllHashmaps()
+		end
+	end)
+end)
+
+-- // Teleport Player on Creation
+
+Teleport.OnServerEvent:Connect(function(player, PlaceID, reservedID)
+	game:GetService("TeleportService"):TeleportToPrivateServer(game.PlaceId, reservedID, {player})
+end)
+
+-- // Remove Hashmap
+
+game:BindToClose(function()
+	pcall(function()
+		Hashmap:RemoveAsync(JobID)
+	end)
 end)
