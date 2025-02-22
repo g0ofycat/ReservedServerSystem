@@ -13,10 +13,11 @@ local JobID = game.JobId
 local MemoryStoreService = game:GetService('MemoryStoreService')
 local Hashmap = MemoryStoreService:GetSortedMap('PlayersInServers')
 local Teleport = events:WaitForChild("Teleport")
+local TextService = game:GetService("TextService")
 
 local Config = {
-    PLAYER_UPDATE_INTERVAL = 5,
-    Expiration = 86400,
+	PLAYER_UPDATE_INTERVAL = 5,
+	Expiration = 86400,
 	SERVER_VALUE_FORMAT = "%s %d %s %s %s",
 	MAX_SERVERS_TO_LOAD = 200
 }
@@ -24,22 +25,24 @@ local Config = {
 local lastUpdate = time()
 local pendingUpdate = false
 
+-- // All Servers inside of a table
+
 local serverEntries = {}
 
 local function UpdatePlayerCount()
-    local playerCount = #Players:GetPlayers()
-    Hashmap:UpdateAsync(JobID, function(serverData)
-        local newData = serverData or {
-            Name = "Game Server",
-            Desc = "Default Description",
-            VCMode = false
-        }
-        newData.PlayerCount = playerCount
-        return newData
-    end, Config.Expiration)
+	local playerCount = #Players:GetPlayers()
+	local sucess, err = pcall(function()
+		Hashmap:UpdateAsync(JobID, function(serverData)
+			serverData = serverData or {}
+			serverData.PlayerCount = playerCount
+			return serverData
+		end, Config.Expiration)
+	end)
 end
 
+
 local function QueuePlayerUpdate()
+	UpdatePlayerCount()
 	if pendingUpdate then return end
 	pendingUpdate = true
 	lastUpdate = time()
@@ -49,9 +52,12 @@ local function QueuePlayerUpdate()
 	end)
 end
 
-
 Players.PlayerAdded:Connect(QueuePlayerUpdate)
 Players.ChildRemoved:Connect(QueuePlayerUpdate) -- // ChildRemoved Fires after PlayerRemoved, meaning that I can use #Players:GetPlayers() instead of #Players:GetPlayers() - 1	
+
+task.defer(function()
+	pcall(QueuePlayerUpdate)
+end)
 
 -- // Teleport Function
 
@@ -63,9 +69,9 @@ local function teleportPlayer(player, placeId, reservedId)
 	local success, err = pcall(function()
 		TeleportService:TeleportToPrivateServer(placeId, reservedId, {player})
 	end)
-	
+
 	if not success then Hashmap:RemoveAsync(reservedId) return warn("Teleport failed! Server: "..reservedId) end
-	
+
 	return success
 end
 
@@ -74,28 +80,65 @@ end
 CreateServer.OnServerEvent:Connect(function(player, Desc, Name, VCMode)
 	local success, code = pcall(TeleportService.ReserveServer, TeleportService, PlaceId)
 
-	if not success then warn("Failed to Reserve Server! "..tostring(code)) return end
+	if not success then
+		warn("Failed to Reserve Server! "..tostring(code))
+		return
+	end
 
-	-- // Initial server data
+	-- // Filtering Name and Desc
+
+	local filteredName, filteredDesc
+
+	local successName, resultName = pcall(function()
+		return TextService:FilterStringAsync(Name, player.UserId)
+	end)
+	if successName and resultName then
+		filteredName = resultName:GetNonChatStringForBroadcastAsync()
+	else
+		filteredName = "[Filtered]"
+		warn("Failed to filter Name:", Name)
+	end
+
+	local successDesc, resultDesc = pcall(function()
+		return TextService:FilterStringAsync(Desc, player.UserId)
+	end)
+	if successDesc and resultDesc then
+		filteredDesc = resultDesc:GetNonChatStringForBroadcastAsync()
+	else
+		filteredDesc = "[Filtered]"
+		warn("Failed to filter Desc:", Desc)
+	end
+
+	-- // Store server data
 	local setSuccess, err = pcall(function()
 		Hashmap:SetAsync(code, {
 			PlayerCount = 1,
-			Name = Name,
-			Desc = Desc,
+			Name = filteredName,
+			Desc = filteredDesc,
 			VCMode = VCMode
 		}, Config.Expiration)
 	end)
 
-	if not setSuccess then warn("Failed to Set Server Data! "..tostring(err)) return end
+	if not setSuccess then
+		warn("Failed to Set Server Data! "..tostring(err))
+		return
+	end
 
 	teleportPlayer(player, PlaceId, code)
 
-	ServerInfo:PublishAsync({
-		Code = code,
-		Name = Name,
-		Desc = Desc,
-		VCMode = VCMode
-	})
+	local success, errPublish = pcall(function()
+		ServerInfo:PublishAsync({
+			Code = code,
+			Name = filteredName,
+			Desc = filteredDesc,
+			VCMode = VCMode
+		})
+	end)
+
+	if not success then
+		warn("Failed to Set Server Data! "..tostring(errPublish))
+		return
+	end
 end)
 
 -- // StringValue Creation for all Reserved Servers
@@ -147,10 +190,6 @@ end
 
 LoadReservedServers()
 
-task.defer(function()
-	pcall(QueuePlayerUpdate)
-end)
-
 -- // Remove Hashmap Function for Debugging
 
 local function RemoveAllHashmaps()
@@ -196,7 +235,11 @@ end)
 -- // Teleport Player on Creation
 
 Teleport.OnServerEvent:Connect(function(player, PlaceID, reservedID)
-	game:GetService("TeleportService"):TeleportToPrivateServer(game.PlaceId, reservedID, {player})
+	local success, err = pcall(function()
+		game:GetService("TeleportService"):TeleportToPrivateServer(game.PlaceId, reservedID, {player})
+	end)
+
+	if not success then return warn("Teleport failed! Server: "..reservedID) end
 end)
 
 -- // Remove Hashmap
